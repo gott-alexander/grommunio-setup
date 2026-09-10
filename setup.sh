@@ -344,9 +344,6 @@ Example: example.com" 0 0 "${DFL}" 3>&1 1>&2 2>&3
   done
   writelog "Configured mail domain: ${DOMAIN}"
 
-  RELAYHOST=$(get_relayhost)
-  writelog "Got relayhost: ${RELAYHOST}"
-
   X500="i$(printf "%llx" "$(date +%s)")"
 fi
 
