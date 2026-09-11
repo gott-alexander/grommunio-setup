@@ -156,7 +156,6 @@ load_core_from_system()
 	[ -z "${X500}" ] && X500=$(getconf_val /etc/gromox/midb.cfg x500_org_name)
 	[ -z "${FQDN}" ] && FQDN=$(hostname -f)
 	[ -z "${DOMAIN}" ] && DOMAIN=$(hostname -d)
-	[ -z "${RELAYHOST}" ] && RELAYHOST=$(postconf -h relayhost 2>/dev/null)
 	FQDN="${FQDN,,}"
 	DOMAIN="${DOMAIN,,}"
 }
@@ -750,7 +749,6 @@ postconf -e \
   recipient_bcc_maps="mysql:/etc/postfix/grommunio-bcc-forwards.cf" \
   unverified_recipient_reject_code=550 \
   virtual_transport="smtp:[::1]:24" \
-  relayhost="${RELAYHOST}" \
   inet_interfaces=all \
   smtpd_helo_restrictions=permit_mynetworks,permit_sasl_authenticated,reject_invalid_hostname,reject_non_fqdn_hostname \
   smtpd_sender_restrictions=reject_non_fqdn_sender,permit_sasl_authenticated,permit_mynetworks \
@@ -773,6 +771,15 @@ postconf -e \
   smtp_tls_security_level=may \
   milter_protocol=6
 postconf -M tlsmgr/unix="tlsmgr unix - - n 1000? 1 tlsmgr"
+
+# Outbound relaying is per-domain now (domain_smtp_gateway table, managed
+# through grommunio admin). Remove any static global relayhost left over
+# from older setups so that routing is exclusively per-domain; domains
+# without a gateway row deliver directly.
+if [ -n "$(postconf -h relayhost 2>/dev/null)" ] ; then
+  writelog "Removing static relayhost (per-domain gateways are managed via grommunio admin)"
+fi
+postconf -e relayhost=
 postconf -M submission/inet="submission inet n - n - - smtpd"
 postconf -P submission/inet/syslog_name="postfix/submission"
 postconf -P submission/inet/smtpd_tls_security_level=encrypt
@@ -847,7 +854,6 @@ systemctl restart grommunio-admin-api.service
 state_set FQDN "${FQDN}"
 state_set DOMAIN "${DOMAIN}"
 state_set X500 "${X500}"
-state_set RELAYHOST "${RELAYHOST}"
 state_set MYSQL_HOST "${MYSQL_HOST}"
 state_set MYSQL_USER "${MYSQL_USER}"
 state_set MYSQL_PASS "${MYSQL_PASS}"
