@@ -91,8 +91,8 @@ get_dkim_redis_pass()
 		writelog "Dialog: DKIM keystore credentials"
 		dialog --no-mouse --clear --colors --backtitle "grommunio Setup" --title "DKIM keystore credentials" --ok-label "Submit" \
 		       --form "Enter the DKIM keystore credentials." 0 0 0   \
-		       "User:    " 1 1 "${in_user}" 1 17 25 0 \
-		       "Password:" 2 1 "${in_pass}" 2 17 25 0 2>"${TMPF}"
+		       "User:    " 1 1 "${in_user}" 1 17 45 0 \
+		       "Password:" 2 1 "${in_pass}" 2 17 45 0 2>"${TMPF}"
 		dialog_exit $?
 		in_user=$(sed -n '1{p;q}' "${TMPF}")
 		in_pass=$(sed -n '2{p;q}' "${TMPF}")
