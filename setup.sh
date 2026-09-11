@@ -729,6 +729,8 @@ MCEOF
 # Sender-dependent smart-host routing; domains without a gateway row
 # keep using the global relayhost.
 postconf -e sender_dependent_default_transport_maps="mysql:/etc/postfix/grommunio-domain-gateway-transport.cf"
+# The Postfix SMTP client must be told to offer AUTH at all
+postconf -e smtp_sasl_auth_enable=yes
 # Append gateway AUTH map to any existing smtp_sasl_password_maps (idempotent)
 SASL_MAPS=$(postconf -h smtp_sasl_password_maps)
 case ",${SASL_MAPS}," in
