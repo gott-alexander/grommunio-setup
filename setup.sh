@@ -757,7 +757,6 @@ postconf -e \
   smtpd_tls_key_file="${SSL_KEY_T}" \
   smtpd_tls_received_header=yes \
   smtpd_tls_session_cache_timeout=3600s \
-  smtpd_use_tls=yes \
   tls_random_source=dev:/dev/urandom \
   smtpd_sasl_auth_enable=yes \
   broken_sasl_auth_clients=yes \
@@ -766,7 +765,6 @@ postconf -e \
   smtpd_milters=inet:localhost:11332 \
   milter_default_action=accept \
   smtp_tls_security_level=may \
-  smtp_use_tls=yes \
   milter_protocol=6
 postconf -M tlsmgr/unix="tlsmgr unix - - n 1000? 1 tlsmgr"
 postconf -M submission/inet="submission inet n - n - - smtpd"
