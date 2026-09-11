@@ -90,6 +90,51 @@ get_relayhost()
 	dialog_exit $?
 }
 
+DKIM_REDIS_PASS_MSG="\
+Password for the dedicated DKIM keystore (Redis instance redis@dkim, listening on localhost only).
+
+grommunio-admin-api and grommunio-antispam use this password to access
+the DKIM keys. Leave the suggested value unchanged unless you have
+specific requirements."
+
+get_dkim_redis_pass()
+{
+	while true ; do
+		DKIM_REDIS_PASS=$(randpw 32)
+		writelog "Dialog: DKIM keystore password"
+		dialog --no-mouse --clear --colors \
+			--backtitle "grommunio Setup" \
+			--title "DKIM keystore password" \
+			--ok-label "Submit" \
+			--passwordform         "${DKIM_REDIS_PASS_MSG}" 0 0 0 \
+			  "Password:     " 1 1 "${DKIM_REDIS_PASS}" 1 17 33 0 \
+			  "Confirmation: " 2 1 "${DKIM_REDIS_PASS}" 2 17 33 0 \
+			2>"${TMPF}"
+		dialog_exit $?
+		PASSONE=$(sed -n '1{p;q}' "${TMPF}")
+		PASSTWO=$(sed -n '2{p;q}' "${TMPF}")
+		if [ "${PASSONE}" != "${PASSTWO}" ] || [ -z "${PASSONE}" ] ; then
+			dialog --no-mouse --clear --colors \
+				--backtitle "grommunio Setup" \
+				--title "DKIM keystore password" \
+				--msgbox 'The passwords were either empty or not identical. Re-enter and confirm the password accordingly.' 0 0
+			dialog_exit $?
+			continue
+		fi
+		if printf '%s' "${PASSONE}" | grep -q '[^A-Za-z0-9_.@#%^+=:/-]' ; then
+			dialog --no-mouse --clear --colors \
+				--backtitle "grommunio Setup" \
+				--title "DKIM keystore password" \
+				--msgbox 'The password contains characters that cannot be used here (quotes, spaces, dollar signs or backslashes). Please choose a different password.' 0 0
+			dialog_exit $?
+			continue
+		fi
+		DKIM_REDIS_PASS=${PASSONE}
+		writelog "DKIM keystore password set"
+		break
+	done
+}
+
 CHOOSE_MODE_MSG="\
 grommunio Setup has already been run on this system.
 

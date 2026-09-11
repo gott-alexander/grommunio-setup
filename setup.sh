@@ -295,6 +295,8 @@ else
 
   dialog_adminpass
 
+  get_dkim_redis_pass
+
   set_fqdn(){
 
     writelog "Dialog: FQDN"
@@ -633,7 +635,14 @@ else
 fi
 
 writelog "Config stage: DKIM keystore (dedicated Redis instance)"
-DKIM_REDIS_PASS=$(randpw 32)
+# On reconfiguration keep the existing keystore password; it can be
+# changed by editing /etc/redis/dkim.conf and re-running setup.
+if [ "${SETUP_MODE}" != "fresh" ] && [ -f /etc/redis/dkim.conf ] ; then
+  DKIM_REDIS_PASS=$(sed -n 's/^requirepass //p' /etc/redis/dkim.conf | head -1)
+  DKIM_REDIS_PASS=${DKIM_REDIS_PASS%\"}
+  DKIM_REDIS_PASS=${DKIM_REDIS_PASS#\"}
+fi
+[ -z "${DKIM_REDIS_PASS}" ] && DKIM_REDIS_PASS=$(randpw 32)
 mkdir -p /var/lib/redis-dkim
 chown redis:redis /var/lib/redis-dkim
 chmod 0750 /var/lib/redis-dkim
@@ -641,7 +650,7 @@ cat > /etc/redis/dkim.conf <<EOF
 port 6380
 bind 127.0.0.1
 protected-mode yes
-requirepass ${DKIM_REDIS_PASS}
+requirepass "${DKIM_REDIS_PASS}"
 dir /var/lib/redis-dkim
 dbfilename dkim.rdb
 appendonly yes
