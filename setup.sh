@@ -731,6 +731,10 @@ MCEOF
 postconf -e sender_dependent_default_transport_maps="mysql:/etc/postfix/grommunio-domain-gateway-transport.cf"
 # The Postfix SMTP client must be told to offer AUTH at all
 postconf -e smtp_sasl_auth_enable=yes
+# Without this, smtp_sasl_password_maps is only searched by nexthop,
+# never by sender -- the sender-dependent gateway credentials would
+# never be found and relays would reject with "Relay access denied".
+postconf -e smtp_sender_dependent_authentication=yes
 # Append gateway AUTH map to any existing smtp_sasl_password_maps (idempotent)
 SASL_MAPS=$(postconf -h smtp_sasl_password_maps)
 case ",${SASL_MAPS}," in
