@@ -156,7 +156,6 @@ load_core_from_system()
 	[ -z "${X500}" ] && X500=$(getconf_val /etc/gromox/midb.cfg x500_org_name)
 	[ -z "${FQDN}" ] && FQDN=$(hostname -f)
 	[ -z "${DOMAIN}" ] && DOMAIN=$(hostname -d)
-	[ -z "${RELAYHOST}" ] && RELAYHOST=$(postconf -h relayhost 2>/dev/null)
 	FQDN="${FQDN,,}"
 	DOMAIN="${DOMAIN,,}"
 }
@@ -295,8 +294,6 @@ else
 
   dialog_adminpass
 
-  get_dkim_redis_pass
-
   set_fqdn(){
 
     writelog "Dialog: FQDN"
@@ -345,9 +342,6 @@ Example: example.com" 0 0 "${DFL}" 3>&1 1>&2 2>&3
     DOMAIN=${ORIGDOMAIN,,}
   done
   writelog "Configured mail domain: ${DOMAIN}"
-
-  RELAYHOST=$(get_relayhost)
-  writelog "Got relayhost: ${RELAYHOST}"
 
   X500="i$(printf "%llx" "$(date +%s)")"
 fi
@@ -635,14 +629,24 @@ else
 fi
 
 writelog "Config stage: DKIM keystore (dedicated Redis instance)"
-# On reconfiguration keep the existing keystore password; it can be
-# changed by editing /etc/redis/dkim.conf and re-running setup.
-if [ "${SETUP_MODE}" != "fresh" ] && [ -f /etc/redis/dkim.conf ] ; then
-  DKIM_REDIS_PASS=$(sed -n 's/^requirepass //p' /etc/redis/dkim.conf | head -1)
-  DKIM_REDIS_PASS=${DKIM_REDIS_PASS%\"}
-  DKIM_REDIS_PASS=${DKIM_REDIS_PASS#\"}
+# If the keystore was provisioned before, keep its credentials; they
+# can be changed by editing /etc/redis/dkim.conf and re-running setup.
+# Otherwise ask for credentials (first provisioning, on fresh installs
+# and on existing systems alike).
+if [ -f /etc/redis/dkim.conf ] ; then
+  DKIM_REDIS_USER=$(sed -n 's/^user \([A-Za-z0-9_.-]*\) on .*/\1/p' /etc/redis/dkim.conf | head -1)
+  if [ -n "${DKIM_REDIS_USER}" ] ; then
+    DKIM_REDIS_PASS=$(sed -n "s/^user ${DKIM_REDIS_USER} on >\([^ ]*\).*/\1/p" /etc/redis/dkim.conf | head -1)
+  else
+    DKIM_REDIS_USER=default
+    DKIM_REDIS_PASS=$(sed -n 's/^requirepass "//p' /etc/redis/dkim.conf | head -1)
+    DKIM_REDIS_PASS=${DKIM_REDIS_PASS%\"}
+  fi
+elif [ -z "${DKIM_REDIS_PASS}" ] ; then
+  get_dkim_redis_pass
 fi
 [ -z "${DKIM_REDIS_PASS}" ] && DKIM_REDIS_PASS=$(randpw 32)
+[ -z "${DKIM_REDIS_USER}" ] && DKIM_REDIS_USER=default
 mkdir -p /var/lib/redis-dkim
 chown redis:redis /var/lib/redis-dkim
 chmod 0750 /var/lib/redis-dkim
@@ -650,12 +654,21 @@ cat > /etc/redis/dkim.conf <<EOF
 port 6380
 bind 127.0.0.1
 protected-mode yes
-requirepass "${DKIM_REDIS_PASS}"
 dir /var/lib/redis-dkim
 dbfilename dkim.rdb
 appendonly yes
 appendfilename "dkim.aof"
 EOF
+if [ "${DKIM_REDIS_USER}" = "default" ] ; then
+  cat >> /etc/redis/dkim.conf <<EOF
+requirepass "${DKIM_REDIS_PASS}"
+EOF
+else
+  cat >> /etc/redis/dkim.conf <<EOF
+user default off
+user ${DKIM_REDIS_USER} on >${DKIM_REDIS_PASS} ~* &* +@all
+EOF
+fi
 systemctl enable --now redis@dkim >>"${LOGFILE}" 2>&1
 
 # grommunio-antispam reads DKIM keys from this instance (use_redis), so
@@ -665,8 +678,10 @@ cat > /etc/grommunio-antispam/local.d/dkim_signing.conf <<EOF
 use_redis = true;
 key_prefix = "DKIM_PRIV_KEYS";
 selector_prefix = "DKIM_SELECTORS";
-read_servers = "${DKIM_REDIS_PASS}@127.0.0.1:6380";
-write_servers = "${DKIM_REDIS_PASS}@127.0.0.1:6380";
+read_servers = "127.0.0.1:6380";
+write_servers = "127.0.0.1:6380";
+username = "${DKIM_REDIS_USER}";
+password = "${DKIM_REDIS_PASS}";
 EOF
 
 # The API pushes generated keys into the keystore itself.
@@ -675,6 +690,7 @@ dkimRedis:
   enabled: true
   host: 127.0.0.1
   port: 6380
+  username: '${DKIM_REDIS_USER}'
   password: '${DKIM_REDIS_PASS}'
 EOF
 
@@ -683,9 +699,9 @@ for keyfile in /var/lib/grommunio-admin-api/*.dkim.key ; do
   [ -e "${keyfile}" ] || continue
   case "${keyfile}" in *.old) continue ;; esac
   ddomain=$(basename "${keyfile}" .dkim.key)
-  redis-cli -h 127.0.0.1 -p 6380 -a "${DKIM_REDIS_PASS}" --no-auth-warning \
+  redis-cli -h 127.0.0.1 -p 6380 --user "${DKIM_REDIS_USER}" -a "${DKIM_REDIS_PASS}" --no-auth-warning \
     HSET DKIM_PRIV_KEYS "dkim.${ddomain}" - < "${keyfile}" >>"${LOGFILE}" 2>&1
-  redis-cli -h 127.0.0.1 -p 6380 -a "${DKIM_REDIS_PASS}" --no-auth-warning \
+  redis-cli -h 127.0.0.1 -p 6380 --user "${DKIM_REDIS_USER}" -a "${DKIM_REDIS_PASS}" --no-auth-warning \
     HSET DKIM_SELECTORS "${ddomain}" dkim >>"${LOGFILE}" 2>&1
 done
 
@@ -762,6 +778,50 @@ dbname = ${MYSQL_DB}
 query = SELECT destination FROM forwards WHERE username=_utf8mb4'%s' COLLATE utf8mb4_general_ci AND forward_type = 0
 EOF
 
+# Per-domain SMTP gateway (smart-host) maps; see doc/mta-smart-hosts.rst in gromox
+cat > /etc/postfix/grommunio-domain-gateway-transport.cf <<EOF
+user = ${MYSQL_USER}
+password = ${MYSQL_PASS}
+hosts = ${MYSQL_HOST}
+dbname = ${MYSQL_DB}
+query = SELECT CONCAT(CASE g.encryption WHEN 'tls' THEN 'gwdsgw_ssl' WHEN 'none' THEN 'smtp' ELSE 'gwdsgw_starttls' END, ':[', g.host, ']:', g.port) FROM domain_smtp_gateway g JOIN domains d ON d.ID = g.domain_id WHERE d.domain_status = 0 AND d.domainname = _utf8mb4'%d' COLLATE utf8mb4_general_ci AND g.enabled = 1
+EOF
+
+cat > /etc/postfix/grommunio-domain-gateway-auth.cf <<EOF
+user = ${MYSQL_USER}
+password = ${MYSQL_PASS}
+hosts = ${MYSQL_HOST}
+dbname = ${MYSQL_DB}
+query = SELECT CONCAT_WS(':', g.username, g.password) FROM domain_smtp_gateway g JOIN domains d ON d.ID = g.domain_id WHERE d.domain_status = 0 AND d.domainname = _utf8mb4'%d' COLLATE utf8mb4_general_ci AND g.enabled = 1 AND g.username IS NOT NULL AND g.username <> ''
+EOF
+
+# TLS transports for the gateway encryption modes (idempotent)
+grep -q '^gwdsgw_starttls' /etc/postfix/master.cf || cat >> /etc/postfix/master.cf <<'MCEOF'
+
+# Per-domain SMTP gateway transports (grommunio domain_smtp_gateway)
+gwdsgw_starttls unix -       -       n       -       -       smtp
+  -o smtp_tls_security_level=encrypt
+gwdsgw_ssl     unix -       -       n       -       -       smtp
+  -o smtp_tls_wrappermode=yes
+  -o smtp_tls_security_level=encrypt
+MCEOF
+
+# Sender-dependent smart-host routing; domains without a gateway row
+# keep using the global relayhost.
+postconf -e sender_dependent_default_transport_maps="mysql:/etc/postfix/grommunio-domain-gateway-transport.cf"
+# The Postfix SMTP client must be told to offer AUTH at all
+postconf -e smtp_sasl_auth_enable=yes
+# Without this, smtp_sasl_password_maps is only searched by nexthop,
+# never by sender -- the sender-dependent gateway credentials would
+# never be found and relays would reject with "Relay access denied".
+postconf -e smtp_sender_dependent_authentication=yes
+# Append gateway AUTH map to any existing smtp_sasl_password_maps (idempotent)
+SASL_MAPS=$(postconf -h smtp_sasl_password_maps)
+case ",${SASL_MAPS}," in
+  *grommunio-domain-gateway-auth*) ;;
+  *) postconf -e "smtp_sasl_password_maps=${SASL_MAPS:+${SASL_MAPS},}mysql:/etc/postfix/grommunio-domain-gateway-auth.cf" ;;
+esac
+
 postconf -e \
   myhostname="${FQDN}" \
   virtual_mailbox_domains="mysql:/etc/postfix/grommunio-virtual-mailbox-domains.cf" \
@@ -770,7 +830,6 @@ postconf -e \
   recipient_bcc_maps="mysql:/etc/postfix/grommunio-bcc-forwards.cf" \
   unverified_recipient_reject_code=550 \
   virtual_transport="smtp:[::1]:24" \
-  relayhost="${RELAYHOST}" \
   inet_interfaces=all \
   smtpd_helo_restrictions=permit_mynetworks,permit_sasl_authenticated,reject_invalid_hostname,reject_non_fqdn_hostname \
   smtpd_sender_restrictions=reject_non_fqdn_sender,permit_sasl_authenticated,permit_mynetworks \
@@ -783,7 +842,6 @@ postconf -e \
   smtpd_tls_key_file="${SSL_KEY_T}" \
   smtpd_tls_received_header=yes \
   smtpd_tls_session_cache_timeout=3600s \
-  smtpd_use_tls=yes \
   tls_random_source=dev:/dev/urandom \
   smtpd_sasl_auth_enable=yes \
   broken_sasl_auth_clients=yes \
@@ -792,9 +850,17 @@ postconf -e \
   smtpd_milters=inet:localhost:11332 \
   milter_default_action=accept \
   smtp_tls_security_level=may \
-  smtp_use_tls=yes \
   milter_protocol=6
 postconf -M tlsmgr/unix="tlsmgr unix - - n 1000? 1 tlsmgr"
+
+# Outbound relaying is per-domain now (domain_smtp_gateway table, managed
+# through grommunio admin). Remove any static global relayhost left over
+# from older setups so that routing is exclusively per-domain; domains
+# without a gateway row deliver directly.
+if [ -n "$(postconf -h relayhost 2>/dev/null)" ] ; then
+  writelog "Removing static relayhost (per-domain gateways are managed via grommunio admin)"
+fi
+postconf -e relayhost=
 postconf -M submission/inet="submission inet n - n - - smtpd"
 postconf -P submission/inet/syslog_name="postfix/submission"
 postconf -P submission/inet/smtpd_tls_security_level=encrypt
@@ -869,7 +935,6 @@ systemctl restart grommunio-admin-api.service
 state_set FQDN "${FQDN}"
 state_set DOMAIN "${DOMAIN}"
 state_set X500 "${X500}"
-state_set RELAYHOST "${RELAYHOST}"
 state_set MYSQL_HOST "${MYSQL_HOST}"
 state_set MYSQL_USER "${MYSQL_USER}"
 state_set MYSQL_PASS "${MYSQL_PASS}"

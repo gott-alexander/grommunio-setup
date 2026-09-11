@@ -74,63 +74,49 @@ dialog_adminpass()
 	fi
 }
 
-RELAYHOST_MSG="\
-Setting a relayhost is necessary if your grommunio server is not able to directly send emails over the internet.
-
-Make sure the relayhost allows relaying for this host. You can add DNS names or IP adresses.
-To ensure no MX DNS lookups are issued, enclose the relayhost in square brackets, like \"[mail.isp.com]\".
-"
-get_relayhost()
-{
-	writelog "Dialog: Postfix relayhost"
-	dialog --no-mouse --clear --colors --cr-wrap \
-		--backtitle "grommunio Setup" \
-		--title "Postfix relayhost" \
-		--inputbox "${RELAYHOST_MSG}" 0 0 "" 3>&1 1>&2 2>&3
-	dialog_exit $?
-}
-
 DKIM_REDIS_PASS_MSG="\
-Password for the dedicated DKIM keystore (Redis instance redis@dkim, listening on localhost only).
+Credentials for the dedicated DKIM keystore (Redis instance redis@dkim, listening on localhost only).
 
-grommunio-admin-api and grommunio-antispam use this password to access
-the DKIM keys. Leave the suggested value unchanged unless you have
-specific requirements."
+grommunio-admin-api and grommunio-antispam use these credentials to
+access the DKIM keys. Leave the suggested values unchanged unless you
+have specific requirements."
 
 get_dkim_redis_pass()
 {
+	local def_user="default" def_pass in_user in_pass
 	while true ; do
-		DKIM_REDIS_PASS=$(randpw 32)
-		writelog "Dialog: DKIM keystore password"
-		dialog --no-mouse --clear --colors \
-			--backtitle "grommunio Setup" \
-			--title "DKIM keystore password" \
-			--ok-label "Submit" \
-			--passwordform         "${DKIM_REDIS_PASS_MSG}" 0 0 0 \
-			  "Password:     " 1 1 "${DKIM_REDIS_PASS}" 1 17 33 0 \
-			  "Confirmation: " 2 1 "${DKIM_REDIS_PASS}" 2 17 33 0 \
-			2>"${TMPF}"
+		def_pass=$(randpw 32)
+		in_user=${in_user:-${DKIM_REDIS_USER:-${def_user}}}
+		in_pass=${in_pass:-${def_pass}}
+		writelog "Dialog: DKIM keystore credentials"
+		dialog --no-mouse --clear --colors --backtitle "grommunio Setup" --title "DKIM keystore credentials" --ok-label "Submit" \
+		       --form "Enter the DKIM keystore credentials." 0 0 0   \
+		       "User:    " 1 1 "${in_user}" 1 17 25 0 \
+		       "Password:" 2 1 "${in_pass}" 2 17 25 0 2>"${TMPF}"
 		dialog_exit $?
-		PASSONE=$(sed -n '1{p;q}' "${TMPF}")
-		PASSTWO=$(sed -n '2{p;q}' "${TMPF}")
-		if [ "${PASSONE}" != "${PASSTWO}" ] || [ -z "${PASSONE}" ] ; then
-			dialog --no-mouse --clear --colors \
-				--backtitle "grommunio Setup" \
-				--title "DKIM keystore password" \
-				--msgbox 'The passwords were either empty or not identical. Re-enter and confirm the password accordingly.' 0 0
+		in_user=$(sed -n '1{p;q}' "${TMPF}")
+		in_pass=$(sed -n '2{p;q}' "${TMPF}")
+		if [ -z "${in_user}" ] || [ -z "${in_pass}" ] ; then
+			dialog --no-mouse --clear --colors --backtitle "grommunio Setup" --title "DKIM keystore credentials" \
+				--msgbox 'The user name and password must not be empty. Re-enter the credentials.' 0 0
 			dialog_exit $?
 			continue
 		fi
-		if printf '%s' "${PASSONE}" | grep -q '[^A-Za-z0-9_.@#%^+=:/-]' ; then
-			dialog --no-mouse --clear --colors \
-				--backtitle "grommunio Setup" \
-				--title "DKIM keystore password" \
+		if printf '%s' "${in_user}" | grep -q '[^A-Za-z0-9_.-]' ; then
+			dialog --no-mouse --clear --colors --backtitle "grommunio Setup" --title "DKIM keystore credentials" \
+				--msgbox 'The user name contains characters that cannot be used here (quotes, spaces or special characters). Please choose a different user name.' 0 0
+			dialog_exit $?
+			continue
+		fi
+		if printf '%s' "${in_pass}" | grep -q '[^A-Za-z0-9_.@#%^+=:/-]' ; then
+			dialog --no-mouse --clear --colors --backtitle "grommunio Setup" --title "DKIM keystore credentials" \
 				--msgbox 'The password contains characters that cannot be used here (quotes, spaces, dollar signs or backslashes). Please choose a different password.' 0 0
 			dialog_exit $?
 			continue
 		fi
-		DKIM_REDIS_PASS=${PASSONE}
-		writelog "DKIM keystore password set"
+		DKIM_REDIS_USER=${in_user}
+		DKIM_REDIS_PASS=${in_pass}
+		writelog "DKIM keystore credentials set (user: ${DKIM_REDIS_USER})"
 		break
 	done
 }
