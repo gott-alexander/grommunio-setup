@@ -646,7 +646,7 @@ elif [ -z "${DKIM_REDIS_PASS}" ] ; then
   get_dkim_redis_pass
 fi
 [ -z "${DKIM_REDIS_PASS}" ] && DKIM_REDIS_PASS=$(randpw 32)
-[ -z "${DKIM_REDIS_USER}" ] && DKIM_REDIS_USER=default
+[ -z "${DKIM_REDIS_USER}" ] && DKIM_REDIS_USER=dkim
 mkdir -p /var/lib/redis-dkim
 chown redis:redis /var/lib/redis-dkim
 chmod 0750 /var/lib/redis-dkim

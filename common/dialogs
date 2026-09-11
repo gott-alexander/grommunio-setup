@@ -83,7 +83,7 @@ have specific requirements."
 
 get_dkim_redis_pass()
 {
-	local def_user="default" def_pass in_user in_pass
+	local def_user="dkim" def_pass in_user in_pass
 	while true ; do
 		def_pass=$(randpw 32)
 		in_user=${in_user:-${DKIM_REDIS_USER:-${def_user}}}
