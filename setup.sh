@@ -632,6 +632,58 @@ else
   writelog "Config stage: preserving existing admin and antispam passwords"
 fi
 
+writelog "Config stage: DKIM keystore (dedicated Redis instance)"
+DKIM_REDIS_PASS=$(randpw 32)
+mkdir -p /var/lib/redis-dkim
+chown redis:redis /var/lib/redis-dkim
+chmod 0750 /var/lib/redis-dkim
+cat > /etc/redis/dkim.conf <<EOF
+port 6380
+bind 127.0.0.1
+protected-mode yes
+requirepass ${DKIM_REDIS_PASS}
+dir /var/lib/redis-dkim
+dbfilename dkim.rdb
+appendonly yes
+appendfilename "dkim.aof"
+EOF
+systemctl enable --now redis@dkim >>"${LOGFILE}" 2>&1
+
+# grommunio-antispam reads DKIM keys from this instance (use_redis), so
+# the API can publish keys without write access to the antispam
+# directories.
+cat > /etc/grommunio-antispam/local.d/dkim_signing.conf <<EOF
+use_redis = true;
+key_prefix = "DKIM_PRIV_KEYS";
+selector_prefix = "DKIM_SELECTORS";
+read_servers = "${DKIM_REDIS_PASS}@127.0.0.1:6380";
+write_servers = "${DKIM_REDIS_PASS}@127.0.0.1:6380";
+EOF
+
+# The API pushes generated keys into the keystore itself.
+cat > /etc/grommunio-admin-api/conf.d/dkim-redis.yaml <<EOF
+dkimRedis:
+  enabled: true
+  host: 127.0.0.1
+  port: 6380
+  password: '${DKIM_REDIS_PASS}'
+EOF
+
+# Import keys generated before this keystore existed (idempotent).
+for keyfile in /var/lib/grommunio-admin-api/*.dkim.key ; do
+  [ -e "${keyfile}" ] || continue
+  case "${keyfile}" in *.old) continue ;; esac
+  ddomain=$(basename "${keyfile}" .dkim.key)
+  redis-cli -h 127.0.0.1 -p 6380 -a "${DKIM_REDIS_PASS}" --no-auth-warning \
+    HSET DKIM_PRIV_KEYS "dkim.${ddomain}" - < "${keyfile}" >>"${LOGFILE}" 2>&1
+  redis-cli -h 127.0.0.1 -p 6380 -a "${DKIM_REDIS_PASS}" --no-auth-warning \
+    HSET DKIM_SELECTORS "${ddomain}" dkim >>"${LOGFILE}" 2>&1
+done
+
+# Locally submitted mail (gromox hands off via sendmail/pickup) is only
+# passed to the milter when non_smtpd_milters is set.
+postconf -e 'non_smtpd_milters=$smtpd_milters'
+
 writelog "Config stage: gromox tls configuration"
 setconf /etc/gromox/http.cfg http_certificate_path "${SSL_BUNDLE_T}"
 setconf /etc/gromox/http.cfg http_private_key_path "${SSL_KEY_T}"
