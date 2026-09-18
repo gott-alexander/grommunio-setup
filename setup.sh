@@ -714,6 +714,20 @@ dbname = ${MYSQL_DB}
 query = SELECT CONCAT_WS(':', g.username, g.password) FROM domain_smtp_gateway g JOIN domains d ON d.ID = g.domain_id WHERE d.domain_status = 0 AND d.domainname = _utf8mb4'%d' COLLATE utf8mb4_general_ci AND g.enabled = 1 AND g.username IS NOT NULL AND g.username <> ''
 EOF
 
+# Relay certificate verification: Postfix looks smtp_tls_policy_maps up by
+# nexthop ("[host]:port"), while the table stores the bare host, hence the
+# SUBSTRING_INDEX normalization. Hosts used by any domain with encryption
+# 'starttls' or 'tls' are pinned to the "secure" level; hosts only used
+# with 'starttls_unverified' have no entry and stay at "encrypt".
+# See doc/mta-smart-hosts.rst in gromox.
+cat > /etc/postfix/grommunio-domain-gateway-tls-policy.cf <<EOF
+user = ${MYSQL_USER}
+password = ${MYSQL_PASS}
+hosts = ${MYSQL_HOST}
+dbname = ${MYSQL_DB}
+query = SELECT CONCAT('secure match=', g.host) FROM domain_smtp_gateway g JOIN domains d ON d.ID = g.domain_id WHERE d.domain_status = 0 AND g.enabled = 1 AND g.encryption IN ('starttls', 'tls') AND g.host = SUBSTRING_INDEX(SUBSTRING_INDEX('%s', ']', 1), '[', -1) LIMIT 1
+EOF
+
 # TLS transports for the gateway encryption modes (idempotent)
 grep -q '^gwdsgw_starttls' /etc/postfix/master.cf || cat >> /etc/postfix/master.cf <<'MCEOF'
 
@@ -740,6 +754,18 @@ case ",${SASL_MAPS}," in
   *grommunio-domain-gateway-auth*) ;;
   *) postconf -e "smtp_sasl_password_maps=${SASL_MAPS:+${SASL_MAPS},}mysql:/etc/postfix/grommunio-domain-gateway-auth.cf" ;;
 esac
+
+# Append gateway TLS policy map to any existing smtp_tls_policy_maps (idempotent)
+POLICY_MAPS=$(postconf -h smtp_tls_policy_maps)
+case ",${POLICY_MAPS}," in
+  *grommunio-domain-gateway-tls-policy*) ;;
+  *) postconf -e "smtp_tls_policy_maps=${POLICY_MAPS:+${POLICY_MAPS},}mysql:/etc/postfix/grommunio-domain-gateway-tls-policy.cf" ;;
+esac
+# The "secure" level requires trust anchors; use the distribution CA bundle
+# unless the admin configured one already.
+if [ -z "$(postconf -h smtp_tls_CAfile 2>/dev/null)" ] && [ -z "$(postconf -h smtp_tls_CApath 2>/dev/null)" ] && [ -f /etc/ssl/ca-bundle.crt ] ; then
+  postconf -e smtp_tls_CAfile=/etc/ssl/ca-bundle.crt
+fi
 
 postconf -e \
   myhostname="${FQDN}" \
