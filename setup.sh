@@ -867,10 +867,10 @@ case ",${POLICY_MAPS}," in
   *grommunio-domain-gateway-tls-policy*) ;;
   *) postconf -e "smtp_tls_policy_maps=${POLICY_MAPS:+${POLICY_MAPS},}mysql:/etc/postfix/grommunio-domain-gateway-tls-policy.cf" ;;
 esac
+
 # The "secure" level requires trust anchors; use the distribution CA bundle
-# unless the admin configured one already.
-if [ -z "$(postconf -h smtp_tls_CAfile 2>/dev/null)" ] && [ -z "$(postconf -h smtp_tls_CApath 2>/dev/null)" ] && [ -f /etc/ssl/ca-bundle.crt ] ; then
-  postconf -e smtp_tls_CAfile=/etc/ssl/ca-bundle.crt
+if [ -z "$(postconf -h smtp_tls_CAfile 2>/dev/null)" ] && [ -f /etc/ssl/ca-bundle.pem ] ; then
+  postconf -e smtp_tls_CAfile=/etc/ssl/ca-bundle.pem
 fi
 
 postconf -e \
