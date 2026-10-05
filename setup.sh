@@ -683,6 +683,8 @@ cat > /etc/redis/dkim.conf <<EOF
 port ${DKIM_REDIS_PORT}
 bind ${DKIM_REDIS_HOST}
 protected-mode yes
+supervised systemd
+pidfile /run/redis/dkim.pid
 dir /var/lib/redis-dkim
 dbfilename dkim.rdb
 appendonly yes
@@ -698,6 +700,19 @@ user default off
 user ${DKIM_REDIS_USER} on >${DKIM_REDIS_PASS} ~* &* +@all
 EOF
 fi
+# Whenever the keystore is (re)started - including at system boot - it is
+# filled from the database right away, so it holds the correct data within
+# seconds instead of waiting for the next timer tick. The sync runs in the
+# background so a slow or failing sync (missing database during early boot)
+# can never hold the keystore unit in "activating"; prefixes: '+' runs it
+# as root (the unit itself runs as redis), '-' keeps a failed sync from
+# failing the keystore unit (the sync timer retries anyway).
+mkdir -p /etc/systemd/system/redis@dkim.service.d
+cat > /etc/systemd/system/redis@dkim.service.d/dkim-sync.conf <<EOF
+[Service]
+ExecStartPost=-+/bin/sh -c '/usr/sbin/grommunio-admin dkim sync >/var/log/grommunio-dkim-sync.log 2>&1 &'
+EOF
+systemctl daemon-reload >>"${LOGFILE}" 2>&1
 systemctl enable --now redis@dkim >>"${LOGFILE}" 2>&1
 
 # grommunio-antispam reads DKIM keys from this instance (use_redis), so
@@ -713,7 +728,8 @@ username = "${DKIM_REDIS_USER}";
 password = "${DKIM_REDIS_PASS}";
 EOF
 
-# The API pushes generated keys into the keystore itself.
+# The API stores keys in the central database (table dkim_keys) and
+# replicates them into this keystore.
 cat > /etc/grommunio-admin-api/conf.d/dkim-redis.yaml <<EOF
 dkimRedis:
   enabled: true
@@ -723,16 +739,15 @@ dkimRedis:
   password: '${DKIM_REDIS_PASS}'
 EOF
 
-# Import keys generated before this keystore existed (idempotent).
-for keyfile in /var/lib/grommunio-admin-api/*.dkim.key ; do
-  [ -e "${keyfile}" ] || continue
-  case "${keyfile}" in *.old) continue ;; esac
-  ddomain=$(basename "${keyfile}" .dkim.key)
-  redis-cli -h "${DKIM_REDIS_HOST}" -p "${DKIM_REDIS_PORT}" --user "${DKIM_REDIS_USER}" -a "${DKIM_REDIS_PASS}" --no-auth-warning \
-    HSET DKIM_PRIV_KEYS "dkim.${ddomain}" - < "${keyfile}" >>"${LOGFILE}" 2>&1
-  redis-cli -h "${DKIM_REDIS_HOST}" -p "${DKIM_REDIS_PORT}" --user "${DKIM_REDIS_USER}" -a "${DKIM_REDIS_PASS}" --no-auth-warning \
-    HSET DKIM_SELECTORS "${ddomain}" dkim >>"${LOGFILE}" 2>&1
-done
+# Import keys of previous versions into the database (runs once per node,
+# guarded by the dbconf marker grommunio-admin/dkim/legacyFileImport; the
+# plaintext files are removed by the import itself - the database is the
+# only storage) and replicate the database into the keystore right away.
+grommunio-admin dkim import >>"${LOGFILE}" 2>&1 || writelog "Warning: DKIM legacy key file import failed (retried at API start)"
+grommunio-admin dkim sync >>"${LOGFILE}" 2>&1 || writelog "Warning: DKIM keystore sync failed (retried by grommunio-admin-dkim-sync.timer)"
+# Failed keystore pushes are retried every minute by the sync timer.
+systemctl enable --now grommunio-admin-dkim-sync.timer >>"${LOGFILE}" 2>&1 \
+  || writelog "Warning: could not enable grommunio-admin-dkim-sync.timer"
 
 # Locally submitted mail (gromox hands off via sendmail/pickup) is only
 # passed to the milter when non_smtpd_milters is set.
