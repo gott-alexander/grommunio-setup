@@ -94,6 +94,47 @@ randpw()
 	< /dev/urandom tr -dc A-Za-z0-9 | head -c"${1:-16}"; echo;
 }
 
+# _credgroup GROUP[,GROUP...] DIR - first candidate group present on the system,
+# else the group of DIR.
+_credgroup()
+{
+	local groups="$1" dir="$2" g
+	for g in ${groups//,/ } ; do
+		if getent group "${g}" >/dev/null 2>&1 ; then
+			echo "${g}"
+			return 0
+		fi
+	done
+	stat -c %G "${dir}" 2>/dev/null
+}
+
+# hardenfile MODE GROUP[,GROUP...] FILE... - restrict credential files, skipping
+# the ones that do not exist.
+hardenfile()
+{
+	local mode="$1" groups="$2" f grp
+	shift 2
+	for f in "$@" ; do
+		[ -e "${f}" ] || continue
+		grp=$(_credgroup "${groups}" "${f%/*}")
+		if [ -n "${grp}" ] && [ "${grp}" != "UNKNOWN" ] ; then
+			chgrp "${grp}" "${f}" 2>/dev/null
+		fi
+		chmod "${mode}" "${f}" 2>/dev/null
+	done
+}
+
+# mkcredfile MODE GROUP[,GROUP...] FILE - create FILE restricted before its
+# contents are written; a later ">" truncates in place and keeps the mode.
+mkcredfile()
+{
+	local mode="$1" groups="$2" file="$3" dir
+	dir="${file%/*}"
+	[ -d "${dir}" ] || mkdir -p "${dir}"
+	( umask 077; : >"${file}" )
+	hardenfile "${mode}" "${groups}" "${file}"
+}
+
 # --- persistent state -------------------------------------------------------
 
 state_load()
@@ -232,6 +273,47 @@ mysql_table_exists()
 pkg_installed()
 {
 	rpm -q "$1" >/dev/null 2>&1
+}
+
+# system_fqdn - this host's FQDN, best effort. "hostname -f" needs the name to
+# resolve (e.g. via /etc/hosts) and otherwise fails or yields the short name,
+# so fall back to the configured static hostname. Sources are queried lazily,
+# /etc/hostname before hostnamectl (D-Bus may be unavailable, e.g. in a chroot),
+# and loopback names (localhost.localdomain) are skipped.
+system_fqdn()
+{
+	local i n first=""
+	for i in 1 2 3 4 ; do
+		case ${i} in
+		1) n=$(hostname -f 2>/dev/null) ;;
+		2) n=$(sed -n '/^[[:space:]]*\(#\|$\)/!{s/[[:space:]]//g;p;q}' /etc/hostname 2>/dev/null) ;;
+		3) n=$(timeout 5 hostnamectl --static 2>/dev/null) ;;
+		4) n=$(hostname 2>/dev/null) ;;
+		esac
+		n="${n%.}"
+		case ${n} in
+		""|localhost|localhost.*) continue ;;
+		esac
+		[ -z "${first}" ] && first="${n}"
+		if [[ ${n} == *.* ]] ; then
+			echo "${n}"
+			return 0
+		fi
+	done
+	echo "${first}"
+}
+
+# fqdn_domain FQDN - the domain part of FQDN (mail.example.com -> example.com),
+# or FQDN itself if stripping the host label would leave only a TLD.
+fqdn_domain()
+{
+	local f="${1%.}" dots
+	dots="${f//[^.]/}"
+	if [ "${#dots}" -ge 2 ] ; then
+		echo "${f#*.}"
+	else
+		echo "${f}"
+	fi
 }
 
 # --- role metadata ----------------------------------------------------------

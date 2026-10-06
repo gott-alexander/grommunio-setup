@@ -14,8 +14,8 @@ fi
 LOGFILE="/var/log/grommunio-setup.log"
 if ! test -e "$LOGFILE"; then
 	true >"$LOGFILE"
-	chmod 0600 "$LOGFILE"
 fi
+chmod 0600 "$LOGFILE"
 # shellcheck source=common/helpers
 . "${DATADIR}/common/helpers"
 # shellcheck source=common/dialogs
@@ -154,8 +154,8 @@ load_core_from_system()
 	v=$(getconf_val /etc/gromox/http.cfg default_domain)  ; [ -n "${v}" ] && DOMAIN="${v}"
 	v=$(getconf_val /etc/gromox/autodiscover.cfg x500_org_name) ; [ -n "${v}" ] && X500="${v}"
 	[ -z "${X500}" ] && X500=$(getconf_val /etc/gromox/midb.cfg x500_org_name)
-	[ -z "${FQDN}" ] && FQDN=$(hostname -f)
-	[ -z "${DOMAIN}" ] && DOMAIN=$(hostname -d)
+	[ -z "${FQDN}" ] && FQDN=$(system_fqdn)
+	[ -z "${DOMAIN}" ] && DOMAIN=$(fqdn_domain "${FQDN}")
 	[ -z "${RELAYHOST}" ] && RELAYHOST=$(postconf -h relayhost 2>/dev/null)
 	FQDN="${FQDN,,}"
 	DOMAIN="${DOMAIN,,}"
@@ -303,7 +303,7 @@ else
 
 Example: grommunio.example.com
 
-This name will be part of the certificates later generated. / This name will have to be present in imported certificates." 0 0 "$(hostname -f)" 3>&1 1>&2 2>&3
+This name will be part of generated certificates, and must be present in imported certificates." 0 0 "$(system_fqdn)" 3>&1 1>&2 2>&3
     dialog_exit $?
 
   }
@@ -320,10 +320,7 @@ This name will be part of the certificates later generated. / This name will hav
 
   set_maildomain(){
 
-    DFL=$(hostname -d)
-    if [ -z "${DFL}" ]; then
-      DFL="${FQDN}"
-    fi
+    DFL=$(fqdn_domain "${FQDN}")
     writelog "Dialog: mail domain"
     dialog --no-mouse --clear --colors --backtitle "grommunio Setup" --title "Mail domain" --cr-wrap --inputbox \
 "Tell us the default mail domain this system serves up. This is used, for example, for Non-Delivery Reports and for generation of some simple TLS certificates. Specify ONLY ONE domain here.
@@ -443,7 +440,7 @@ Example: ${SSL_EMAIL}" 0 0 "${SSL_EMAIL}" 3>&1 1>&2 2>&3
                --checklist "Choose the Let's Encrypt certificates to request.\nBy requesting certificates from Let's Encrypt, you agree to the terms of service at ${LE_TERMS_URL}.\nThe DNS records should be set accordingly before proceeding."  0 0  0 \
                "${DOMAIN}"              "recommended" on  \
                "${FQDN}"                "recommended" on  \
-               "autodiscover.${DOMAIN}" "recommended" off 2>"${TMPF}"
+               "autodiscover.${DOMAIN}" "recommended" on  2>"${TMPF}"
       else
         dialog --no-mouse --colors --backtitle "grommunio Setup" --title "TLS certificate (Let's Encrypt)" --ok-label "Submit" \
                --checklist "Choose the Let's Encrypt certificates to request.\nBy requesting certificates from Let's Encrypt, you agree to the terms of service at ${LE_TERMS_URL}.\nThe DNS records should be set accordingly before proceeding."  0 0  0 \
@@ -615,6 +612,7 @@ else
   gromox-dbop -U >>"${LOGFILE}" 2>&1
 fi
 
+mkcredfile 0640 grommunio /etc/grommunio-admin-api/conf.d/database.yaml
 cat > /etc/grommunio-admin-api/conf.d/database.yaml <<EOF
 DB:
   host: '${MYSQL_HOST}'
@@ -627,6 +625,7 @@ progress 60
 if [ "${SETUP_MODE}" = "fresh" ] ; then
   writelog "Config stage: admin password set"
   grommunio-admin passwd --password "${ADMIN_PASS}" >>"${LOGFILE}" 2>&1
+  mkcredfile 0640 grommunio /etc/grommunio-antispam/local.d/worker-controller.inc
   rspamadm pw -p "${ADMIN_PASS}" | sed -e 's#^#password = "#' -e 's#$#";#' > /etc/grommunio-antispam/local.d/worker-controller.inc
 else
   writelog "Config stage: preserving existing admin and antispam passwords"
@@ -790,6 +789,7 @@ chmod 0640 /etc/gromox/*.cfg
 writelog "Config stage: postfix configuration"
 progress 80
 
+mkcredfile 0640 postfix /etc/postfix/grommunio-virtual-mailbox-domains.cf
 cat > /etc/postfix/grommunio-virtual-mailbox-domains.cf <<EOF
 user = ${MYSQL_USER}
 password = ${MYSQL_PASS}
@@ -798,6 +798,7 @@ dbname = ${MYSQL_DB}
 query = SELECT 1 FROM domains WHERE domain_status=0 AND domainname=_utf8mb4'%s' COLLATE utf8mb4_general_ci
 EOF
 
+mkcredfile 0640 postfix /etc/postfix/grommunio-virtual-mailbox-alias-maps.cf
 cat > /etc/postfix/grommunio-virtual-mailbox-alias-maps.cf <<EOF
 user = ${MYSQL_USER}
 password = ${MYSQL_PASS}
@@ -806,6 +807,7 @@ dbname = ${MYSQL_DB}
 query = SELECT mainname FROM aliases WHERE aliasname=_utf8mb4'%s' COLLATE utf8mb4_general_ci UNION SELECT destination FROM forwards WHERE username=_utf8mb4'%s' COLLATE utf8mb4_general_ci AND forward_type = 1
 EOF
 
+mkcredfile 0640 postfix /etc/postfix/grommunio-virtual-mailbox-maps.cf
 cat > /etc/postfix/grommunio-virtual-mailbox-maps.cf <<EOF
 user = ${MYSQL_USER}
 password = ${MYSQL_PASS}
@@ -814,6 +816,7 @@ dbname = ${MYSQL_DB}
 query = SELECT 1 FROM users WHERE username=_utf8mb4'%s' COLLATE utf8mb4_general_ci
 EOF
 
+mkcredfile 0640 postfix /etc/postfix/grommunio-bcc-forwards.cf
 cat > /etc/postfix/grommunio-bcc-forwards.cf <<EOF
 user = ${MYSQL_USER}
 password = ${MYSQL_PASS}
@@ -924,6 +927,15 @@ build_config_json
 systemctl restart grommunio-admin-api.service
 
 # ---------------------------------------------------------------------------
+# Hand freshly added roles to grommunio-auth so they get their OIDC client.
+# ---------------------------------------------------------------------------
+if [ -s /etc/grommunio-auth/grommunio-auth.conf ] && \
+   [ -x /usr/share/grommunio-auth/setup-grommunio-auth-clients.sh ] ; then
+  writelog "Config stage: grommunio-auth client setup"
+  /usr/share/grommunio-auth/setup-grommunio-auth-clients.sh -q >>"${LOGFILE}" 2>&1 || :
+fi
+
+# ---------------------------------------------------------------------------
 # Persist state for idempotent future runs.
 # ---------------------------------------------------------------------------
 state_set FQDN "${FQDN}"
@@ -945,6 +957,48 @@ done
 # Mark the installation as fully completed only now, at the very end, so an
 # aborted run is retried as fresh rather than as a broken reconfigure.
 echo "# Do not delete this file unless you know what you do!" > /etc/grommunio-common/setup_done
+
+# ---------------------------------------------------------------------------
+# Repair the modes of credential files left world-readable by earlier versions,
+# including roles that were kept and therefore not rewritten above.
+# ---------------------------------------------------------------------------
+harden_credential_files()
+{
+  hardenfile 0640 grommunio /etc/grommunio-admin-api/conf.d/database.yaml \
+                            /etc/grommunio-admin-api/conf.d/chat.yaml
+  hardenfile 0640 postfix /etc/postfix/grommunio-virtual-mailbox-domains.cf \
+                          /etc/postfix/grommunio-virtual-mailbox-alias-maps.cf \
+                          /etc/postfix/grommunio-virtual-mailbox-maps.cf \
+                          /etc/postfix/grommunio-bcc-forwards.cf
+  hardenfile 0640 grommunio /etc/grommunio-antispam/local.d/worker-controller.inc
+  hardenfile 0600 "" /etc/zypp/repos.d/grommunio.repo
+  hardenfile 0640 grochat /etc/grommunio-chat/config.json
+  hardenfile 0640 prosody "/etc/prosody/conf.d/${FQDN}.cfg.lua"
+  # jicofo and jvb run with Group=jitsi; their own user groups are not active
+  hardenfile 0640 jitsi /etc/jitsi/jicofo/jitsi-jicofo.conf
+  hardenfile 0640 jitsi /etc/jitsi/videobridge/application.conf
+  hardenfile 0640 groarchive /etc/grommunio-archive/config-site.php \
+                             /etc/grommunio-archive/grommunio-archive.conf \
+                             /etc/grommunio-archive/grommunio-archive.key
+  hardenfile 0640 sphinx /etc/sphinx/sphinx.conf
+}
+JVB_CONF_GROUP=$(stat -c %G /etc/jitsi/videobridge/application.conf 2>/dev/null)
+harden_credential_files
+
+# Services restarted above may have given up on a file that was only made
+# readable just now; bring them back.
+{
+  for u in grommunio-antispam postfix prosody jitsi-jicofo jitsi-videobridge grommunio-chat ; do
+    if systemctl -q is-failed "${u}.service" ; then
+      systemctl reset-failed "${u}.service"
+      systemctl restart "${u}.service"
+    fi
+  done
+  # jvb keeps running on built-in defaults when it cannot read its config
+  if [ -n "${JVB_CONF_GROUP}" ] && [ "${JVB_CONF_GROUP}" != "jitsi" ] ; then
+    systemctl try-restart jitsi-videobridge.service
+  fi
+} >>"${LOGFILE}" 2>&1
 
 progress 100
 writelog "Config stage: completed"

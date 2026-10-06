@@ -142,7 +142,7 @@ setup_role_chat()
 	sed -i 's|"SiteURL": "",|"SiteURL": "https://'"${FQDN}"'/chat",|g' "${CHAT_CONFIG}"
 	touch "/var/log/grommunio-chat/mattermost.log"
 	chown -R grochat:grochat "/etc/grommunio-chat/" "/usr/share/grommunio-chat/logs" "/usr/share/grommunio-chat/config" "/var/log/grommunio-chat" "/var/lib/grommunio-chat/"
-	chmod 644 "${CHAT_CONFIG}"
+	chmod 640 "${CHAT_CONFIG}"
 	systemctl enable grommunio-chat >>"${LOGFILE}" 2>&1
 	systemctl restart grommunio-chat >>"${LOGFILE}" 2>&1
 	dialog_chat_adminpass
@@ -161,6 +161,7 @@ setup_role_chat()
 		MMCTL_LOCAL_SOCKET_PATH=/var/tmp/grommunio-chat_local.socket bin/grommunio-chat-ctl --local user create --email admin@localhost --username admin --password "${CHAT_ADMIN_PASS}" --system-admin >>"${LOGFILE}" 2>&1
 	popd || return
 
+mkcredfile 0640 grommunio /etc/grommunio-admin-api/conf.d/chat.yaml
 cat > /etc/grommunio-admin-api/conf.d/chat.yaml <<EOCHAT
 chat:
   connection:
@@ -215,6 +216,18 @@ files_occ_upgrade()
 	return 0
 }
 
+# overwrite.cli.url must not contain the /files webroot: in CLI context (cron,
+# occ) grommunio Files prepends it to paths that already contain overwritewebroot,
+# which yields /files/files/... URLs (breaks e.g. the ONLYOFFICE cron check).
+# Applied on every run so kept/restored installs get corrected as well.
+files_set_cli_url()
+{
+	pkg_installed grommunio-files || return 0
+	[ -x /usr/share/grommunio-files/occ ] || return 0
+	( cd /usr/share/grommunio-files && sudo -u grofiles ./occ -q -n config:system:set overwrite.cli.url --value="https://${FQDN}" ) >>"${LOGFILE}" 2>&1
+	return 0
+}
+
 # Wire the OnlyOffice document server into grommunio-files. Idempotent (occ
 # config writes), so it is safe to (re-)run whenever both roles are present.
 wire_files_office()
@@ -226,7 +239,13 @@ wire_files_office()
 		sudo -u grofiles ./occ -q -n config:system:set --type boolean --value="true" csrf.disabled >>"${LOGFILE}" 2>&1
 		sudo -u grofiles ./occ -q -n config:app:set onlyoffice DocumentServerUrl --value="https://${FQDN}/office/" >>"${LOGFILE}" 2>&1
 		sudo -u grofiles ./occ -q -n config:app:set onlyoffice DocumentServerInternalUrl --value="https://${FQDN}/office/" >>"${LOGFILE}" 2>&1
-		sudo -u grofiles ./occ -q -n config:app:set onlyoffice StorageUrl --value="https://${FQDN}/files/" >>"${LOGFILE}" 2>&1
+		# StorageUrl must stay unset: with overwritewebroot=/files it only rewrites
+		# the base URL onto itself, and in cron/occ (CLI) context it yields
+		# /files/files/... URLs the document server gets a 404 for
+		sudo -u grofiles ./occ -q -n config:app:delete onlyoffice StorageUrl >>"${LOGFILE}" 2>&1
+		# the document server is reached via the local FQDN, which resolves to a
+		# local/private address that grommunio Files refuses by default
+		sudo -u grofiles ./occ -q -n config:system:set allow_local_remote_servers --type=boolean --value=true >>"${LOGFILE}" 2>&1
 		sudo -u grofiles ./occ -q -n config:app:set onlyoffice customizationChat --value=false >>"${LOGFILE}" 2>&1
 		sudo -u grofiles ./occ -q -n config:app:set onlyoffice customizationCompactHeader --value=true >>"${LOGFILE}" 2>&1
 		sudo -u grofiles ./occ -q -n config:app:set onlyoffice customizationFeedback --value=false >>"${LOGFILE}" 2>&1
@@ -245,6 +264,7 @@ setup_role_files()
 		# A package update may have bumped the Nextcloud schema; migrate the DB
 		# to match the code (web upgrade is disabled, so it cannot self-heal).
 		files_occ_upgrade
+		files_set_cli_url
 		systemctl enable grommunio-files-cron.service grommunio-files-cron.timer >>"${LOGFILE}" 2>&1
 		systemctl start grommunio-files-cron.timer >>"${LOGFILE}" 2>&1
 		return 0
@@ -261,6 +281,7 @@ setup_role_files()
 	if restore_role files; then
 		writelog "Config feature files: restored previous configuration."
 		files_occ_upgrade
+		files_set_cli_url
 		systemctl enable grommunio-files-cron.service grommunio-files-cron.timer >>"${LOGFILE}" 2>&1
 		systemctl start grommunio-files-cron.timer >>"${LOGFILE}" 2>&1
 		state_set FT_FILES true
@@ -323,6 +344,7 @@ EOFILESCONF
 		sudo -u grofiles ./occ -q -n config:system:set trusted_domains 1 --value="${FQDN}" >>"${LOGFILE}" 2>&1
 		sudo -u grofiles ./occ -q -n config:system:set trusted_domains 2 --value="${DOMAIN}" >>"${LOGFILE}" 2>&1
 		sudo -u grofiles ./occ -q -n config:system:set trusted_domains 3 --value="mail.${DOMAIN}" >>"${LOGFILE}" 2>&1
+		files_set_cli_url
 		sudo -u grofiles ./occ -q -n app:enable user_external >>"${LOGFILE}" 2>&1
 		sudo -u grofiles ./occ -q -n config:system:set user_backends 0 arguments 0 --value="https://${FQDN}/dav" >>"${LOGFILE}" 2>&1
 		sudo -u grofiles ./occ -q -n config:system:set user_backends 0 class --value='\OCA\UserExternal\BasicAuth' >>"${LOGFILE}" 2>&1
@@ -504,6 +526,7 @@ setup_role_archive()
 		sed -e "s#grommunioArchiveAdmin#${ARCHIVE_ADMIN_PASS}#g" -e "s#grommunioArchiveAuditor#${ARCHIVE_AUDIT_PASS}#g" /usr/share/grommunio-archive/db-mysql.sql | mysql -h"${ARCHIVE_MYSQL_HOST}" -u"${ARCHIVE_MYSQL_USER}" -p"${ARCHIVE_MYSQL_PASS}" "${ARCHIVE_MYSQL_DB}"
 	fi
 
+	mkcredfile 0640 groarchive /etc/grommunio-archive/config-site.php
 	sed -e "s#MYHOSTNAME#${FQDN}#g" -e "s#MYSMTP#${DOMAIN}#g" -e "s/MYSQL_HOSTNAME/${ARCHIVE_MYSQL_HOST}/" -e "s/MYSQL_DATABASE/${ARCHIVE_MYSQL_DB}/" -e "s/MYSQL_PASSWORD/${ARCHIVE_MYSQL_PASS}/" -e "s/MYSQL_USERNAME/${ARCHIVE_MYSQL_USER}/" /etc/grommunio-archive/config-site.dist.php > /etc/grommunio-archive/config-site.php
 	# config-site.php carries the archive DB password - restrict to groarchive.
 	chgrp groarchive /etc/grommunio-archive/config-site.php
@@ -518,6 +541,7 @@ setup_role_archive()
 	setconf /etc/grommunio-archive/grommunio-archive.conf listen_addr 0.0.0.0 0
 	setconf /etc/grommunio-archive/grommunio-archive.conf storedir /var/lib/grommunio-archive/store
 
+	mkcredfile 0640 sphinx /etc/sphinx/sphinx.conf
 	php /etc/grommunio-archive/sphinx.conf.dist > /etc/sphinx/sphinx.conf
 	sed -i -e "s/MYSQL_HOSTNAME/${ARCHIVE_MYSQL_HOST}/" -e "s/MYSQL_DATABASE/${ARCHIVE_MYSQL_DB}/" -e "s/MYSQL_PASSWORD/${ARCHIVE_MYSQL_PASS}/" -e "s/MYSQL_USERNAME/${ARCHIVE_MYSQL_USER}/" /etc/sphinx/sphinx.conf
 	chown groarchive:sphinx /etc/sphinx/sphinx.conf
@@ -529,6 +553,7 @@ setup_role_archive()
 	sudo -u groarchive indexer --all
 
 	if [ ! -s /etc/grommunio-archive/grommunio-archive.key ]; then
+		mkcredfile 0640 groarchive /etc/grommunio-archive/grommunio-archive.key
 		< /dev/urandom head -c 56 > /etc/grommunio-archive/grommunio-archive.key
 	fi
 	# The archive encryption key must not be world-readable.
